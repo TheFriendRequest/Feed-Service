@@ -7,7 +7,7 @@ import hashlib
 import json
 import mysql.connector
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from auth import verify_firebase_token, get_firebase_uid
+from auth import get_firebase_uid
 from model import PostCreate, PostUpdate, PostResponse
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
@@ -158,6 +158,8 @@ def get_posts(
     # Generate eTag for the collection
     etag = generate_etag({"posts": posts, "total": total, "skip": skip, "limit": limit})
     response.headers["ETag"] = f'"{etag}"'
+    print(f"[Feed Service] Generated ETag for posts collection: {etag}")
+    print(f"[Feed Service] ETag header set: {response.headers.get('ETag')}")
     
     # Return with pagination metadata and HATEOAS links
     return {
@@ -471,13 +473,13 @@ def delete_post(post_id: int, firebase_uid: str = Depends(get_firebase_uid)):
 # ----------------------
 # Interests endpoints
 # ----------------------
-@router.get("/interests/", response_model=List[Dict[str, Any]])
+@router.get("/interests/")
 def get_interests(firebase_uid: str = Depends(get_firebase_uid)):
     """Get all available interests"""
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     cur.execute("SELECT interest_id, interest_name FROM Interests ORDER BY interest_name")
-    interests = cur.fetchall()
+    interests = cast(List[Dict[str, Any]], cur.fetchall())
     cur.close()
     cnx.close()
     return interests
