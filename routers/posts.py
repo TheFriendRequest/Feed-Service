@@ -8,7 +8,7 @@ import json
 import mysql.connector
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from auth import get_firebase_uid
-from model import PostCreate, PostUpdate, PostResponse
+from model import PostCreate, PostUpdate, PostResponse, InterestResponse
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
 
@@ -22,26 +22,6 @@ def get_connection():
         password=os.getenv("DB_PASS", "admin"),
         database=os.getenv("DB_NAME", "feed_db")
     )
-
-
-# ----------------------
-# Helper: Get user_id from Firebase UID
-# ----------------------
-def get_user_id_from_firebase_uid(firebase_uid: str) -> Optional[int]:
-    """Get user_id from Users table using Firebase UID"""
-    # Connect to user_db to get user_id
-    cnx = mysql.connector.connect(
-        host=os.getenv("DB_HOST", "127.0.0.1"),
-        user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASS", "admin"),
-        database=os.getenv("USER_DB_NAME", "user_db")
-    )
-    cur = cnx.cursor(dictionary=True)
-    cur.execute("SELECT user_id FROM Users WHERE firebase_uid = %s", (firebase_uid,))
-    row = cast(Optional[Dict[str, Any]], cur.fetchone())
-    cur.close()
-    cnx.close()
-    return cast(int, row['user_id']) if row and 'user_id' in row else None
 
 
 # ----------------------
@@ -91,7 +71,7 @@ def get_post_interests(post_id: int) -> List[Dict[str, Any]]:
 @router.get("/", response_model=Dict[str, Any])
 def get_posts(
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid),
+    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
     skip: int = Query(0, ge=0, description="Number of posts to skip"),
     limit: int = Query(10, ge=1, le=100, description="Number of posts to return"),
     interest_id: Optional[int] = Query(None, description="Filter by interest ID"),
@@ -182,7 +162,7 @@ def get_posts(
 def get_post(
     post_id: int,
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid),
+    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
     if_none_match: Optional[str] = Header(None, alias="If-None-Match")
 ):
     """
@@ -228,20 +208,14 @@ def get_post(
 def create_post(
     post: PostCreate,
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid)
+    firebase_uid: str = Depends(get_firebase_uid)  # Verify Firebase token (defense in depth)
 ):
     """
-    Create a new post (requires Firebase authentication).
+    Create a new post.
+    The created_by field must be provided in the request body (user_id from Composite Service).
+    Firebase token is verified but firebase_uid is not used to look up user_id.
     Returns 201 Created with Location header.
     """
-    # Get user_id from Firebase UID
-    user_id = get_user_id_from_firebase_uid(firebase_uid)
-    if not user_id:
-        raise HTTPException(
-            status_code=404,
-            detail="User not found in database. Please sync your account first."
-        )
-    
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     
@@ -250,7 +224,7 @@ def create_post(
         INSERT INTO Posts (title, body, image_url, created_by)
         VALUES (%s, %s, %s, %s)
     """
-    values = (post.title, post.body, post.image_url, user_id)
+    values = (post.title, post.body, post.image_url, post.created_by)
     cur.execute(sql, values)
     cnx.commit()
     post_id = cur.lastrowid
@@ -310,22 +284,16 @@ def update_post(
     post_id: int,
     post: PostUpdate,
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid),
+    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
+    created_by: int = Query(..., description="User ID of the creator (for authorization check)"),
     if_match: Optional[str] = Header(None, alias="If-Match")
 ):
     """
-    Update a post (requires Firebase authentication).
+    Update a post.
     Supports eTag validation with If-Match header.
-    Users can only update posts they created.
+    The created_by query parameter is used to verify the user is the creator.
+    Firebase token is verified but firebase_uid is not used to look up user_id.
     """
-    # Get user_id from Firebase UID
-    user_id = get_user_id_from_firebase_uid(firebase_uid)
-    if not user_id:
-        raise HTTPException(
-            status_code=404,
-            detail="User not found in database. Please sync your account first."
-        )
-    
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     
@@ -341,7 +309,7 @@ def update_post(
         cnx.close()
         raise HTTPException(status_code=404, detail="Post not found")
     
-    if existing_post.get('created_by') != user_id:
+    if existing_post.get('created_by') != created_by:
         cur.close()
         cnx.close()
         raise HTTPException(
@@ -427,19 +395,16 @@ def update_post(
 
 
 @router.delete("/{post_id}")
-def delete_post(post_id: int, firebase_uid: str = Depends(get_firebase_uid)):
+def delete_post(
+    post_id: int,
+    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
+    created_by: int = Query(..., description="User ID of the creator (for authorization check)")
+):
     """
-    Delete a post (requires Firebase authentication).
-    Users can only delete posts they created.
+    Delete a post.
+    The created_by query parameter is used to verify the user is the creator.
+    Firebase token is verified but firebase_uid is not used to look up user_id.
     """
-    # Get user_id from Firebase UID
-    user_id = get_user_id_from_firebase_uid(firebase_uid)
-    if not user_id:
-        raise HTTPException(
-            status_code=404,
-            detail="User not found in database. Please sync your account first."
-        )
-    
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     
@@ -454,7 +419,7 @@ def delete_post(post_id: int, firebase_uid: str = Depends(get_firebase_uid)):
         cnx.close()
         raise HTTPException(status_code=404, detail="Post not found")
     
-    if post.get('created_by') != user_id:
+    if post.get('created_by') != created_by:
         cur.close()
         cnx.close()
         raise HTTPException(
@@ -474,7 +439,9 @@ def delete_post(post_id: int, firebase_uid: str = Depends(get_firebase_uid)):
 # Interests endpoints
 # ----------------------
 @router.get("/interests/")
-def get_interests(firebase_uid: str = Depends(get_firebase_uid)):
+def get_interests(
+    firebase_uid: str = Depends(get_firebase_uid)  # Verify Firebase token (defense in depth)
+):
     """Get all available interests"""
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)

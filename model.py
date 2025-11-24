@@ -11,6 +11,7 @@ class PostBase(BaseModel):
     image_url: Optional[str] = None
 
 class PostCreate(PostBase):
+    created_by: int  # user_id passed from Composite Service
     interest_ids: Optional[List[int]] = []  # List of interest IDs to associate with the post
 
 class PostUpdate(BaseModel):
