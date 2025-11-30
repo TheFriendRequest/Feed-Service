@@ -1,13 +1,13 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query, Header, Response
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Header, Response, Request
 from typing import Optional, Dict, Any, List, cast
 from datetime import datetime
 import os
 import sys
 import hashlib
 import json
-import mysql.connector
+import mysql.connector  # type: ignore
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from auth import get_firebase_uid
+# Authentication removed - trust x-firebase-uid header from API Gateway
 from model import PostCreate, PostUpdate, PostResponse, InterestResponse
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
@@ -25,6 +25,16 @@ def get_connection():
 
 
 # ----------------------
+# Helper: Get firebase_uid from header (set by API Gateway)
+# ----------------------
+def get_firebase_uid_from_header(request: Request) -> str:
+    """Get firebase_uid from x-firebase-uid header (injected by API Gateway)"""
+    firebase_uid = request.headers.get("x-firebase-uid") or request.headers.get("X-Firebase-Uid")
+    if not firebase_uid:
+        raise HTTPException(status_code=401, detail="Authentication required - x-firebase-uid header missing")
+    return firebase_uid
+
+# ----------------------
 # Helper: Generate eTag
 # ----------------------
 def generate_etag(data: dict) -> str:
@@ -39,10 +49,10 @@ def generate_etag(data: dict) -> str:
 def add_links(post_id: int, base_url: str = "") -> dict:
     """Add HATEOAS links to post"""
     return {
-        "self": f"{base_url}/posts/{post_id}",
-        "collection": f"{base_url}/posts",
-        "interests": f"{base_url}/posts/{post_id}/interests",
-        "author": f"{base_url}/users/{post_id}"  # Relative path example
+        "self": {"href": f"{base_url}/posts/{post_id}"},
+        "collection": {"href": f"{base_url}/posts"},
+        "interests": {"href": f"{base_url}/posts/{post_id}/interests"},
+        "author": {"href": f"{base_url}/users/{post_id}"}  # Relative path example
     }
 
 
@@ -71,7 +81,7 @@ def get_post_interests(post_id: int) -> List[Dict[str, Any]]:
 @router.get("/", response_model=Dict[str, Any])
 def get_posts(
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
+    request: Request,
     skip: int = Query(0, ge=0, description="Number of posts to skip"),
     limit: int = Query(10, ge=1, le=100, description="Number of posts to return"),
     interest_id: Optional[int] = Query(None, description="Filter by interest ID"),
@@ -82,7 +92,9 @@ def get_posts(
     Get all posts with pagination and query parameters.
     Supports filtering by interest_id, created_by, and search.
     Returns HATEOAS links and pagination metadata.
+    Trusts x-firebase-uid header from API Gateway.
     """
+    firebase_uid = get_firebase_uid_from_header(request)
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     
@@ -149,11 +161,11 @@ def get_posts(
         "limit": limit,
         "has_more": (skip + limit) < total,
         "links": {
-            "self": f"/posts?skip={skip}&limit={limit}",
-            "first": f"/posts?skip=0&limit={limit}",
-            "last": f"/posts?skip={max(0, (total - 1) // limit * limit)}&limit={limit}",
-            "next": f"/posts?skip={skip + limit}&limit={limit}" if (skip + limit) < total else None,
-            "prev": f"/posts?skip={max(0, skip - limit)}&limit={limit}" if skip > 0 else None
+            "self": {"href": f"/posts?skip={skip}&limit={limit}"},
+            "first": {"href": f"/posts?skip=0&limit={limit}"},
+            "last": {"href": f"/posts?skip={max(0, (total - 1) // limit * limit)}&limit={limit}"},
+            "next": {"href": f"/posts?skip={skip + limit}&limit={limit}"} if (skip + limit) < total else None,
+            "prev": {"href": f"/posts?skip={max(0, skip - limit)}&limit={limit}"} if skip > 0 else None
         }
     }
 
@@ -162,12 +174,13 @@ def get_posts(
 def get_post(
     post_id: int,
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
+    request: Request,
     if_none_match: Optional[str] = Header(None, alias="If-None-Match")
 ):
     """
     Get a specific post by ID with eTag support.
     Returns 304 Not Modified if eTag matches.
+    Trusts x-firebase-uid header from API Gateway.
     """
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
@@ -208,14 +221,15 @@ def get_post(
 def create_post(
     post: PostCreate,
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid)  # Verify Firebase token (defense in depth)
+    request: Request
 ):
     """
     Create a new post.
     The created_by field must be provided in the request body (user_id from Composite Service).
-    Firebase token is verified but firebase_uid is not used to look up user_id.
+    Trusts x-firebase-uid header from API Gateway.
     Returns 201 Created with Location header.
     """
+    firebase_uid = get_firebase_uid_from_header(request)
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     
@@ -284,7 +298,7 @@ def update_post(
     post_id: int,
     post: PostUpdate,
     response: Response,
-    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
+    request: Request,
     created_by: int = Query(..., description="User ID of the creator (for authorization check)"),
     if_match: Optional[str] = Header(None, alias="If-Match")
 ):
@@ -292,8 +306,9 @@ def update_post(
     Update a post.
     Supports eTag validation with If-Match header.
     The created_by query parameter is used to verify the user is the creator.
-    Firebase token is verified but firebase_uid is not used to look up user_id.
+    Trusts x-firebase-uid header from API Gateway.
     """
+    firebase_uid = get_firebase_uid_from_header(request)
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     
@@ -397,14 +412,15 @@ def update_post(
 @router.delete("/{post_id}")
 def delete_post(
     post_id: int,
-    firebase_uid: str = Depends(get_firebase_uid),  # Verify Firebase token (defense in depth)
+    request: Request,
     created_by: int = Query(..., description="User ID of the creator (for authorization check)")
 ):
     """
     Delete a post.
     The created_by query parameter is used to verify the user is the creator.
-    Firebase token is verified but firebase_uid is not used to look up user_id.
+    Trusts x-firebase-uid header from API Gateway.
     """
+    firebase_uid = get_firebase_uid_from_header(request)
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     
@@ -439,10 +455,9 @@ def delete_post(
 # Interests endpoints
 # ----------------------
 @router.get("/interests/")
-def get_interests(
-    firebase_uid: str = Depends(get_firebase_uid)  # Verify Firebase token (defense in depth)
-):
-    """Get all available interests"""
+def get_interests(request: Request):
+    """Get all available interests. Trusts x-firebase-uid header from API Gateway."""
+    firebase_uid = get_firebase_uid_from_header(request)
     cnx = get_connection()
     cur = cnx.cursor(dictionary=True)
     cur.execute("SELECT interest_id, interest_name FROM Interests ORDER BY interest_name")
